@@ -10,7 +10,11 @@
     teacherReviews: {},
     teacherMode: false,
     studentName: '学生',
-    showComparison: false
+    showComparison: false,
+    classRoster: {},
+    viewingStudentId: null,
+    classroomSummary: {},
+    comparisonMode: 'reference'
   };
 
   function loadState() {
@@ -24,6 +28,9 @@
         state.teacherReviews = parsed.teacherReviews || {};
         state.teacherMode = parsed.teacherMode || false;
         state.studentName = parsed.studentName || '学生';
+        state.classRoster = parsed.classRoster || {};
+        state.classroomSummary = parsed.classroomSummary || {};
+        state.comparisonMode = parsed.comparisonMode || 'reference';
       }
     } catch(e) {}
   }
@@ -36,7 +43,10 @@
         currentCaseId: state.currentCaseId,
         teacherReviews: state.teacherReviews,
         teacherMode: state.teacherMode,
-        studentName: state.studentName
+        studentName: state.studentName,
+        classRoster: state.classRoster,
+        classroomSummary: state.classroomSummary,
+        comparisonMode: state.comparisonMode
       }));
     } catch(e) {}
   }
@@ -85,6 +95,226 @@
     if (!state.teacherReviews[caseId]) state.teacherReviews[caseId] = {};
     state.teacherReviews[caseId][reviewKey] = text;
     saveState();
+  }
+
+  function getClassroomSummary(caseId) {
+    if (!state.classroomSummary[caseId]) return '';
+    return state.classroomSummary[caseId] || '';
+  }
+
+  function setClassroomSummary(caseId, text) {
+    state.classroomSummary[caseId] = text;
+    saveState();
+  }
+
+  function addStudentToRoster(studentData) {
+    var studentId = studentData.studentId || ('s_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
+    state.classRoster[studentId] = {
+      id: studentId,
+      name: studentData.name || '学生',
+      caseId: studentData.caseId,
+      annotations: studentData.annotations || {},
+      editHistory: studentData.editHistory || [],
+      teacherReviews: studentData.teacherReviews || {},
+      importedAt: new Date().toLocaleString('zh-CN')
+    };
+    saveState();
+    return studentId;
+  }
+
+  function removeStudentFromRoster(studentId) {
+    if (state.classRoster[studentId]) {
+      delete state.classRoster[studentId];
+      saveState();
+    }
+  }
+
+  function getRosterStudents(caseId) {
+    var results = [];
+    Object.keys(state.classRoster).forEach(function(sid) {
+      var s = state.classRoster[sid];
+      if (!caseId || s.caseId === caseId) {
+        results.push(s);
+      }
+    });
+    return results;
+  }
+
+  function getStudentAnnotationCount(student) {
+    if (!student.annotations || !student.caseId) return 0;
+    var anns = student.annotations[student.caseId] || student.annotations;
+    return Object.keys(anns).filter(function(k) {
+      return anns[k] && anns[k].stance;
+    }).length;
+  }
+
+  function getStudentMainStance(student) {
+    if (!student.annotations || !student.caseId) return null;
+    var anns = student.annotations[student.caseId] || student.annotations;
+    var counts = { supportive: 0, neutral: 0, critical: 0 };
+    Object.keys(anns).forEach(function(k) {
+      if (anns[k] && anns[k].stance && counts[anns[k].stance] !== undefined) {
+        counts[anns[k].stance]++;
+      }
+    });
+    var max = 0;
+    var main = null;
+    Object.keys(counts).forEach(function(s) {
+      if (counts[s] > max) {
+        max = counts[s];
+        main = s;
+      }
+    });
+    return { stance: main, count: max, total: Object.keys(anns).length };
+  }
+
+  function computeClassStats(caseId) {
+    var students = getRosterStudents(caseId);
+    var c = getCase(caseId);
+    if (!c || students.length === 0) return null;
+
+    var materialStats = {};
+    c.materials.forEach(function(m) {
+      materialStats[m.id] = {
+        material: m,
+        stances: { supportive: 0, neutral: 0, critical: 0 },
+        emotions: [],
+        entities: {},
+        audiences: {},
+        annotatedCount: 0
+      };
+    });
+
+    students.forEach(function(s) {
+      var anns = s.annotations[caseId] || s.annotations || {};
+      Object.keys(anns).forEach(function(mid) {
+        var ann = anns[mid];
+        if (!ann || !materialStats[mid]) return;
+        var ms = materialStats[mid];
+        ms.annotatedCount++;
+        if (ann.stance && ms.stances[ann.stance] !== undefined) {
+          ms.stances[ann.stance]++;
+        }
+        if (ann.emotion) {
+          ms.emotions.push(ann.emotion);
+        }
+        if (ann.entities && ann.entities.length > 0) {
+          ann.entities.forEach(function(e) {
+            ms.entities[e] = (ms.entities[e] || 0) + 1;
+          });
+        }
+        if (ann.audience && ann.audience.length > 0) {
+          ann.audience.forEach(function(a) {
+            ms.audiences[a] = (ms.audiences[a] || 0) + 1;
+          });
+        }
+      });
+    });
+
+    var divisiveMaterials = [];
+    Object.keys(materialStats).forEach(function(mid) {
+      var ms = materialStats[mid];
+      if (ms.annotatedCount >= 2) {
+        var stanceValues = [ms.stances.supportive, ms.stances.neutral, ms.stances.critical];
+        var maxStance = Math.max.apply(null, stanceValues);
+        var totalStance = ms.stances.supportive + ms.stances.neutral + ms.stances.critical;
+        var divergence = totalStance > 0 ? 1 - (maxStance / totalStance) : 0;
+        divisiveMaterials.push({
+          materialId: mid,
+          material: ms.material,
+          divergence: divergence,
+          stances: ms.stances,
+          annotatedCount: ms.annotatedCount
+        });
+      }
+    });
+
+    divisiveMaterials.sort(function(a, b) { return b.divergence - a.divergence; });
+
+    var avgEvidenceScore = 0;
+    var scoredCount = 0;
+    students.forEach(function(s) {
+      var sAnnotations = s.annotations[caseId] || s.annotations || {};
+      var totalAnns = Object.keys(sAnnotations).filter(function(k) {
+        return sAnnotations[k] && sAnnotations[k].stance;
+      }).length;
+      if (totalAnns > 0) {
+        var score = computeEvidenceChainScoreForStudent(c, sAnnotations);
+        if (score !== null) {
+          avgEvidenceScore += score.total;
+          scoredCount++;
+        }
+      }
+    });
+    avgEvidenceScore = scoredCount > 0 ? Math.round(avgEvidenceScore / scoredCount) : 0;
+
+    var avgCompletion = 0;
+    students.forEach(function(s) {
+      var count = getStudentAnnotationCount(s);
+      avgCompletion += count;
+    });
+    avgCompletion = students.length > 0 ? Math.round(avgCompletion / students.length) : 0;
+
+    return {
+      studentCount: students.length,
+      avgCompletion: avgCompletion,
+      avgEvidenceScore: avgEvidenceScore,
+      materialStats: materialStats,
+      divisiveMaterials: divisiveMaterials.slice(0, 5),
+      totalMaterials: c.materials.length
+    };
+  }
+
+  function computeEvidenceChainScoreForStudent(c, studentAnnotations) {
+    var originalAnnotations = state.annotations;
+    var tempAnnotations = {};
+    tempAnnotations[c.id] = studentAnnotations;
+    state.annotations = tempAnnotations;
+    var result = computeEvidenceChainScore(c, studentAnnotations);
+    state.annotations = originalAnnotations;
+    return result;
+  }
+
+  function getClassAverageForMaterial(caseId, materialId) {
+    var stats = computeClassStats(caseId);
+    if (!stats || !stats.materialStats[materialId]) return null;
+    var ms = stats.materialStats[materialId];
+    if (ms.annotatedCount === 0) return null;
+
+    var totalStance = ms.stances.supportive + ms.stances.neutral + ms.stances.critical;
+    var avgStance = null;
+    if (totalStance > 0) {
+      if (ms.stances.supportive >= ms.stances.neutral && ms.stances.supportive >= ms.stances.critical) {
+        avgStance = 'supportive';
+      } else if (ms.stances.critical >= ms.stances.neutral && ms.stances.critical >= ms.stances.supportive) {
+        avgStance = 'critical';
+      } else {
+        avgStance = 'neutral';
+      }
+    }
+
+    var avgEmotion = 3;
+    if (ms.emotions.length > 0) {
+      var sum = ms.emotions.reduce(function(a, b) { return a + b; }, 0);
+      avgEmotion = Math.round(sum / ms.emotions.length);
+    }
+
+    var topEntities = Object.keys(ms.entities).sort(function(a, b) {
+      return ms.entities[b] - ms.entities[a];
+    }).slice(0, 4);
+
+    var topAudiences = Object.keys(ms.audiences).sort(function(a, b) {
+      return ms.audiences[b] - ms.audiences[a];
+    }).slice(0, 4);
+
+    return {
+      stance: avgStance,
+      emotion: avgEmotion,
+      entities: topEntities,
+      audiences: topAudiences,
+      sampleSize: ms.annotatedCount,
+      stances: ms.stances
+    };
   }
 
   function getAnnotationCount(caseId) {
@@ -138,14 +368,29 @@
       state.currentPage = 'annotate';
     } else if (hash === '#/report') {
       state.currentPage = 'report';
+    } else if (hash === '#/dashboard') {
+      state.currentPage = 'dashboard';
     } else if (hash.startsWith('#/case/')) {
       var caseId = hash.replace('#/case/', '');
       state.currentCaseId = caseId;
       state.currentMaterialId = null;
+      state.viewingStudentId = null;
       saveState();
       state.currentPage = 'annotate';
       location.hash = '#/annotate';
       return;
+    } else if (hash.startsWith('#/student/')) {
+      var studentId = hash.replace('#/student/', '');
+      var student = state.classRoster[studentId];
+      if (student) {
+        state.viewingStudentId = studentId;
+        state.currentCaseId = student.caseId;
+        state.currentMaterialId = null;
+        saveState();
+        state.currentPage = 'report';
+        location.hash = '#/report';
+        return;
+      }
     }
     updateNav();
     render();
@@ -159,6 +404,11 @@
         link.classList.add('active');
       }
     });
+
+    var dashboardLink = document.querySelector('.nav-dashboard');
+    if (dashboardLink) {
+      dashboardLink.style.display = state.teacherMode ? 'flex' : 'none';
+    }
 
     var modeToggle = document.getElementById('mode-toggle');
     if (modeToggle) {
@@ -184,6 +434,9 @@
       case 'report':
         content.innerHTML = renderReportPage();
         break;
+      case 'dashboard':
+        content.innerHTML = renderDashboardPage();
+        break;
     }
     bindEvents();
     updateNav();
@@ -207,6 +460,176 @@
     html += '<input type="file" id="import-file" accept=".json" style="display:none;">';
     html += '</div>';
     html += '</div>';
+    return html;
+  }
+
+  function renderDashboardPage() {
+    var html = renderModeBar();
+
+    html += '<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;">';
+    html += '<div><h1>👨‍‍🏫 班级看板</h1>';
+    html += '<p>查看班级整体表现、学生完成情况和分歧分布，点击学生可进入其报告详情</p></div>';
+    html += '<div style="display:flex;gap:10px;flex-wrap:wrap;">';
+    html += '<select id="dashboard-case-select" class="btn btn-outline" style="padding:8px 14px;font-size:13px;cursor:pointer;">';
+    html += '<option value="">全部案例</option>';
+    CASES.forEach(function(c) {
+      html += '<option value="' + c.id + '">' + c.title + '</option>';
+    });
+    html += '</select>';
+    html += '<button id="dashboard-import-btn" class="btn btn-primary">📥 导入学生练习包</button>';
+    html += '<input type="file" id="dashboard-import-file" accept=".json" multiple style="display:none;">';
+    html += '<a href="#/" class="btn btn-outline" style="text-decoration:none;">← 返回案例库</a>';
+    html += '</div></div>';
+
+    var students = getRosterStudents(state.currentCaseId || null);
+    var hasStudents = students.length > 0;
+
+    if (!hasStudents) {
+      html += '<div class="case-prompt">';
+      html += '<div class="case-prompt-icon">📚</div>';
+      html += '<h3>暂无学生数据</h3>';
+      html += '<p>点击「导入学生练习包」按钮，导入学生提交的 JSON 练习包文件</p>';
+      html += '<p style="font-size:12px;color:var(--text-secondary);margin-top:8px;">支持同时选择多个练习包文件批量导入</p>';
+      html += '</div>';
+      return html;
+    }
+
+    var c = state.currentCaseId ? getCase(state.currentCaseId) : null;
+    var stats = state.currentCaseId ? computeClassStats(state.currentCaseId) : null;
+
+    if (stats) {
+      html += '<div class="dashboard-stats">';
+      html += '<div class="stat-card">';
+      html += '<div class="stat-icon">👥</div>';
+      html += '<div class="stat-content">';
+      html += '<div class="stat-value">' + stats.studentCount + '</div>';
+      html += '<div class="stat-label">提交学生数</div>';
+      html += '</div></div>';
+      html += '<div class="stat-card">';
+      html += '<div class="stat-icon">✅</div>';
+      html += '<div class="stat-content">';
+      html += '<div class="stat-value">' + stats.avgCompletion + '/' + stats.totalMaterials + '</div>';
+      html += '<div class="stat-label">平均完成条数</div>';
+      html += '</div></div>';
+      html += '<div class="stat-card">';
+      html += '<div class="stat-icon">🎯</div>';
+      html += '<div class="stat-content">';
+      html += '<div class="stat-value">' + stats.avgEvidenceScore + '</div>';
+      html += '<div class="stat-label">平均证据链得分</div>';
+      html += '</div></div>';
+      html += '<div class="stat-card">';
+      html += '<div class="stat-icon">⚡</div>';
+      html += '<div class="stat-content">';
+      html += '<div class="stat-value">' + stats.divisiveMaterials.length + '</div>';
+      html += '<div class="stat-label">高分歧材料</div>';
+      html += '</div></div>';
+      html += '</div>';
+    }
+
+    html += '<div class="dashboard-grid">';
+
+    html += '<div class="dashboard-panel">';
+    html += '<div class="dashboard-panel-header"><h3>📋 学生列表</h3>';
+    html += '<span class="dashboard-panel-sub">共 ' + students.length + ' 名学生</span></div>';
+    html += '<div class="student-table">';
+    html += '<div class="student-table-header">';
+    html += '<div class="th-name">学生姓名</div>';
+    html += '<div class="th-progress">完成度</div>';
+    html += '<div class="th-stance">主要立场</div>';
+    html += '<div class="th-score">证据链</div>';
+    html += '<div class="th-review">点评状态</div>';
+    html += '<div class="th-action">操作</div>';
+    html += '</div>';
+    html += '<div class="student-table-body">';
+
+    students.forEach(function(s) {
+      var count = getStudentAnnotationCount(s);
+      var total = s.caseId ? (getCase(s.caseId) ? getCase(s.caseId).materials.length : 0) : 0;
+      var pct = total > 0 ? Math.round((count / total) * 100) : 0;
+      var mainStance = getStudentMainStance(s);
+      var score = null;
+      if (s.caseId && count > 0) {
+        var caseObj = getCase(s.caseId);
+        if (caseObj) {
+          var sAnns = s.annotations[s.caseId] || s.annotations || {};
+          score = computeEvidenceChainScoreForStudent(caseObj, sAnns);
+        }
+      }
+      var reviewCount = 0;
+      if (s.teacherReviews) {
+        var reviews = s.teacherReviews[s.caseId] || s.teacherReviews || {};
+        reviewCount = Object.keys(reviews).filter(function(k) { return reviews[k] && reviews[k].trim(); }).length;
+      }
+
+      html += '<div class="student-row" data-student-id="' + s.id + '">';
+      html += '<div class="td-name">';
+      html += '<div class="student-avatar">' + (s.name ? s.name.charAt(0) : '学') + '</div>';
+      html += '<div>';
+      html += '<div class="student-name">' + escapeHtml(s.name) + '</div>';
+      html += '<div class="student-case">' + (s.caseId ? (getCase(s.caseId) ? getCase(s.caseId).title : '') : '') + '</div>';
+      html += '</div></div>';
+      html += '<div class="td-progress">';
+      html += '<div class="progress-bar-bg" style="width:100px;"><div class="progress-bar-fill" style="width:' + pct + '%"></div></div>';
+      html += '<span class="progress-num">' + count + '/' + total + '</span>';
+      html += '</div>';
+      html += '<div class="td-stance">';
+      if (mainStance && mainStance.stance) {
+        html += '<span class="stance-badge stance-' + mainStance.stance + '">' + getStanceLabel(mainStance.stance) + '</span>';
+      } else {
+        html += '<span style="color:var(--text-light);font-size:12px;">暂无</span>';
+      }
+      html += '</div>';
+      html += '<div class="td-score">';
+      if (score) {
+        var scoreColor = score.total >= 70 ? 'var(--success)' : score.total >= 40 ? 'var(--warning)' : 'var(--danger)';
+        html += '<span style="font-weight:700;color:' + scoreColor + ';">' + score.total + '</span>';
+      } else {
+        html += '<span style="color:var(--text-light);font-size:12px;">--</span>';
+      }
+      html += '</div>';
+      html += '<div class="td-review">';
+      if (reviewCount > 0) {
+        html += '<span class="review-badge reviewed">已点评 ' + reviewCount + ' 项</span>';
+      } else {
+        html += '<span class="review-badge pending">待点评</span>';
+      }
+      html += '</div>';
+      html += '<div class="td-action">';
+      html += '<button class="btn btn-sm btn-outline view-student-btn" data-student-id="' + s.id + '">查看报告</button>';
+      html += '<button class="btn btn-sm btn-danger remove-student-btn" data-student-id="' + s.id + '" style="margin-left:6px;">删除</button>';
+      html += '</div>';
+      html += '</div>';
+    });
+
+    html += '</div></div></div>';
+
+    if (stats && stats.divisiveMaterials.length > 0) {
+      html += '<div class="dashboard-panel">';
+      html += '<div class="dashboard-panel-header"><h3>⚡ 班级分歧最大材料</h3>';
+      html += '<span class="dashboard-panel-sub">立场分布最分散的TOP5</span></div>';
+      html += '<div class="divisive-list">';
+
+      stats.divisiveMaterials.forEach(function(dm, idx) {
+        var mat = dm.material;
+        html += '<div class="divisive-item">';
+        html += '<div class="divisive-rank">' + (idx + 1) + '</div>';
+        html += '<div class="divisive-content">';
+        html += '<div class="divisive-title">' + escapeHtml(mat.title || mat.content.slice(0, 50) + '...') + '</div>';
+        html += '<div class="divisive-source">' + mat.source + ' · ' + mat.timestamp + '</div>';
+        html += '<div class="stance-distribution">';
+        html += '<span class="stance-dist-item dist-supportive">支持 ' + dm.stances.supportive + '</span>';
+        html += '<span class="stance-dist-item dist-neutral">中立 ' + dm.stances.neutral + '</span>';
+        html += '<span class="stance-dist-item dist-critical">批判 ' + dm.stances.critical + '</span>';
+        html += '<span class="divisive-score">分歧度 ' + Math.round(dm.divergence * 100) + '%</span>';
+        html += '</div>';
+        html += '</div></div>';
+      });
+
+      html += '</div></div>';
+    }
+
+    html += '</div>';
+
     return html;
   }
 
@@ -264,11 +687,17 @@
     var totalCount = c.materials.length;
 
     var html = renderModeBar();
-    html += '<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;">';
+    html += '<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">';
     html += '<div><h1>🏷️ ' + c.title + '</h1>';
     html += '<p>' + c.category + ' · ' + c.difficulty + ' · 共 ' + totalCount + ' 条材料 · 练习者: ' + escapeHtml(state.studentName) + '</p></div>';
-    html += '<div style="display:flex;gap:10px;flex-wrap:wrap;">';
-    html += '<button id="toggle-compare" class="btn btn-outline" style="text-decoration:none;">' + (state.showComparison ? '👁️ 隐藏对照' : '🔍 查看参考答案对照') + '</button>';
+    html += '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">';
+    if (state.showComparison) {
+      html += '<div class="compare-tabs">';
+      html += '<button class="compare-tab' + (state.comparisonMode === 'reference' ? ' active' : '') + '" data-compare-mode="reference">📖 参考答案</button>';
+      html += '<button class="compare-tab' + (state.comparisonMode === 'class' ? ' active' : '') + '" data-compare-mode="class">👥 班级平均</button>';
+      html += '</div>';
+    }
+    html += '<button id="toggle-compare" class="btn btn-outline" style="text-decoration:none;">' + (state.showComparison ? '👁️ 隐藏对照' : '🔍 开启同伴对照') + '</button>';
     html += '<a href="#/" class="btn btn-outline" style="text-decoration:none;">← 返回案例库</a>';
     html += '<a href="#/report" class="btn btn-success" style="text-decoration:none;">查看课堂报告 →</a>';
     html += '</div></div>';
@@ -286,8 +715,13 @@
       var isAnnotated = ann && ann.stance;
       var typeInfo = TYPE_LABELS[m.type];
       var diffInfo = null;
+      var classDiffInfo = null;
       if (state.showComparison && isAnnotated) {
-        diffInfo = computeAnnotationDiff(c.id, m.id, ann);
+        if (state.comparisonMode === 'reference') {
+          diffInfo = computeAnnotationDiff(c.id, m.id, ann);
+        } else {
+          classDiffInfo = computeClassDiff(c.id, m.id, ann);
+        }
       }
 
       html += '<div class="timeline-item' + (isActive ? ' active' : '') + (isAnnotated ? ' annotated' : '') + '" data-material-id="' + m.id + '">';
@@ -299,10 +733,18 @@
       html += '<div class="timeline-item-source">';
       html += '<span class="source-badge ' + m.type + '">' + typeInfo.label + '</span>';
       html += '<span class="timeline-item-time">' + m.source + ' · ' + m.timestamp + '</span>';
-      if (diffInfo && diffInfo.hasDiff) {
-        html += '<span class="diff-badge diff-high">⚠️ 差异 ' + diffInfo.score + '/10</span>';
-      } else if (diffInfo && !diffInfo.hasDiff) {
-        html += '<span class="diff-badge diff-low">✓ 一致</span>';
+      if (state.comparisonMode === 'reference' && diffInfo) {
+        if (diffInfo.hasDiff) {
+          html += '<span class="diff-badge diff-high">⚠️ 差异 ' + diffInfo.score + '/10</span>';
+        } else {
+          html += '<span class="diff-badge diff-low">✓ 与参考一致</span>';
+        }
+      } else if (state.comparisonMode === 'class' && classDiffInfo) {
+        if (classDiffInfo.hasDiff) {
+          html += '<span class="diff-badge diff-high">⚠️ 偏离同伴 ' + classDiffInfo.score + '/10</span>';
+        } else {
+          html += '<span class="diff-badge diff-low">✓ 符合班级主流</span>';
+        }
       }
       html += '</div>';
       if (m.title) {
@@ -337,7 +779,11 @@
     html += '</div>';
 
     if (currentMat && state.showComparison && annotation && annotation.stance) {
-      html += renderComparisonPanel(c, currentMat, annotation);
+      if (state.comparisonMode === 'reference') {
+        html += renderComparisonPanel(c, currentMat, annotation);
+      } else {
+        html += renderClassComparisonPanel(c, currentMat, annotation);
+      }
     }
 
     if (currentMat && annotation && annotation.stance && !state.showComparison) {
@@ -384,6 +830,107 @@
     }
 
     return { score: Math.max(0, score), hasDiff: diffs.length > 0, diffs: diffs, ref: ref };
+  }
+
+  function computeClassDiff(caseId, materialId, ann) {
+    var classAvg = getClassAverageForMaterial(caseId, materialId);
+    if (!classAvg) return null;
+
+    var score = 10;
+    var diffs = [];
+
+    if (ann.stance !== classAvg.stance) {
+      score -= 4;
+      diffs.push({ field: '立场倾向', yours: getStanceLabel(ann.stance), ref: getStanceLabel(classAvg.stance) + '（' + classAvg.sampleSize + '人）', weight: 'high' });
+    }
+
+    var emoDiff = Math.abs((ann.emotion || 3) - (classAvg.emotion || 3));
+    if (emoDiff >= 2) {
+      score -= 2;
+      diffs.push({ field: '情绪强度', yours: getEmotionLabel(ann.emotion || 3), ref: getEmotionLabel(classAvg.emotion || 3) + '（平均）', weight: 'mid' });
+    }
+
+    var myEntities = ann.entities || [];
+    var refEntities = classAvg.entities || [];
+    var entityOverlap = myEntities.filter(function(e) { return refEntities.indexOf(e) !== -1; }).length;
+    var entityTotal = Math.max(myEntities.length, refEntities.length, 1);
+    if (entityOverlap / entityTotal < 0.5) {
+      score -= 2;
+      diffs.push({ field: '涉及主体', yours: myEntities.join('、') || '未选', ref: refEntities.join('、') + '（高频）', weight: 'mid' });
+    }
+
+    var myAudience = ann.audience || [];
+    var refAudience = classAvg.audiences || [];
+    var audOverlap = myAudience.filter(function(a) { return refAudience.indexOf(a) !== -1; }).length;
+    var audTotal = Math.max(myAudience.length, refAudience.length, 1);
+    if (audOverlap / audTotal < 0.5) {
+      score -= 2;
+      diffs.push({ field: '可能受众', yours: myAudience.join('、') || '未选', ref: refAudience.join('、') + '（高频）', weight: 'low' });
+    }
+
+    return { score: Math.max(0, score), hasDiff: diffs.length > 0, diffs: diffs, classAvg: classAvg };
+  }
+
+  function renderClassComparisonPanel(c, mat, ann) {
+    var diff = computeClassDiff(c.id, mat.id, ann);
+    if (!diff) {
+      var stats = computeClassStats(c.id);
+      if (!stats || stats.studentCount < 2) {
+        return '<div class="comparison-panel"><div class="comparison-all-good" style="background:var(--bg);color:var(--text-secondary);">👥 班级数据不足，请先导入至少2名学生的练习包再使用班级对照功能</div></div>';
+      }
+      return '';
+    }
+
+    var classAvg = diff.classAvg;
+    var html = '<div class="comparison-panel">';
+    html += '<div class="comparison-header">';
+    html += '<span class="comparison-title">👥 班级平均对照分析</span>';
+    html += '<span class="comparison-score' + (diff.score >= 7 ? ' score-good' : diff.score >= 4 ? ' score-mid' : ' score-low') + '">';
+    html += '同伴一致性：' + diff.score + '/10';
+    html += '</span></div>';
+
+    if (diff.diffs.length === 0) {
+      html += '<div class="comparison-all-good">';
+      html += '🎉 你的判断与班级主流高度一致，说明你和同学们对该材料的解读相近。';
+      html += '</div>';
+    } else {
+      html += '<div class="comparison-list">';
+      diff.diffs.forEach(function(d) {
+        html += '<div class="comparison-item diff-weight-' + d.weight + '">';
+        html += '<div class="comparison-field">' + d.field + '</div>';
+        html += '<div class="comparison-sides">';
+        html += '<div class="comparison-side yours">';
+        html += '<div class="comparison-side-label">你的判断</div>';
+        html += '<div class="comparison-side-value">' + escapeHtml(d.yours) + '</div>';
+        html += '</div>';
+        html += '<div class="comparison-arrow">→</div>';
+        html += '<div class="comparison-side ref">';
+        html += '<div class="comparison-side-label">班级平均</div>';
+        html += '<div class="comparison-side-value">' + escapeHtml(d.ref) + '</div>';
+        html += '</div>';
+        html += '</div></div>';
+      });
+      html += '</div>';
+    }
+
+    if (classAvg && classAvg.stances) {
+      var total = classAvg.stances.supportive + classAvg.stances.neutral + classAvg.stances.critical;
+      html += '<div class="class-stance-dist">';
+      html += '<div class="comparison-field" style="padding:0 22px 10px;">📊 班级立场分布（共' + classAvg.sampleSize + '人标注）</div>';
+      html += '<div class="stance-bar" style="padding:0 22px 16px;">';
+      html += '<div class="stance-bar-fill">';
+      var supPct = total > 0 ? Math.round(classAvg.stances.supportive / total * 100) : 0;
+      var neuPct = total > 0 ? Math.round(classAvg.stances.neutral / total * 100) : 0;
+      var criPct = total > 0 ? Math.round(classAvg.stances.critical / total * 100) : 0;
+      html += '<div class="stance-bar-seg seg-supportive" style="width:' + supPct + '%;" title="支持' + classAvg.stances.supportive + '人"></div>';
+      html += '<div class="stance-bar-seg seg-neutral" style="width:' + neuPct + '%;" title="中立' + classAvg.stances.neutral + '人"></div>';
+      html += '<div class="stance-bar-seg seg-critical" style="width:' + criPct + '%;" title="批判' + classAvg.stances.critical + '人"></div>';
+      html += '</div></div>';
+      html += '</div>';
+    }
+
+    html += '</div>';
+    return html;
   }
 
   function renderComparisonPanel(c, mat, ann) {
@@ -657,13 +1204,22 @@
     }
 
     var html = renderModeBar();
-    html += '<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;">';
+    html += '<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">';
     html += '<div><h1>📊 课堂报告 — ' + c.title + '</h1>';
     html += '<p>' + c.category + ' · ' + c.difficulty + ' · 标注完成 ' + doneCount + '/' + totalCount + ' · 练习者: ' + escapeHtml(state.studentName) + '</p></div>';
-    html += '<div class="report-actions">';
+    html += '<div class="report-actions" style="display:flex;gap:10px;flex-wrap:wrap;">';
+    if (state.viewingStudentId && state.teacherMode) {
+      html += '<a href="#/dashboard" class="btn btn-outline" style="text-decoration:none;background:var(--purple-light);color:var(--purple);border-color:var(--purple-light);">← 返回班级看板</a>';
+    }
     html += '<a href="#/annotate" class="btn btn-outline" style="text-decoration:none;">← 返回标注</a>';
     html += '<button class="btn btn-primary" id="print-report">🖨️ 打印报告</button>';
     html += '</div></div>';
+
+    if (state.viewingStudentId && state.teacherMode) {
+      html += '<div class="viewing-banner">';
+      html += '<span>👨‍🏫 正在查看 <strong>' + escapeHtml(state.studentName) + '</strong> 的报告，可直接在下方添加点评</span>';
+      html += '</div>';
+    }
 
     html += '<div class="report-wrap">';
     html += '<div class="report-body">';
@@ -682,6 +1238,7 @@
     html += renderNarrativeLines(c, annotations);
     html += renderDivergencePoints(c, annotations);
     html += renderPropagationNodes(c, annotations);
+    html += renderClassroomSummarySection(c);
     html += renderTeacherReviewsSection(c);
     html += renderEditHistory(c);
 
@@ -762,10 +1319,25 @@
 
     var sourceCoverage = 0;
     var sourceMax = 25;
+    var totalTiers = 0;
+    var fullyCoveredTiers = 0;
+    var partiallyCoveredTiers = 0;
     Object.keys(tierCounts).forEach(function(t) {
-      if (tierCounts[t] > 0 && tierAnnotated[t] === tierCounts[t]) sourceCoverage += 6;
-      else if (tierCounts[t] > 0 && tierAnnotated[t] > 0) sourceCoverage += 3;
+      if (tierCounts[t] > 0) {
+        totalTiers++;
+        if (tierAnnotated[t] === tierCounts[t]) {
+          fullyCoveredTiers++;
+        } else if (tierAnnotated[t] > 0) {
+          partiallyCoveredTiers++;
+        }
+      }
     });
+
+    if (totalTiers > 0) {
+      var fullScore = fullyCoveredTiers / totalTiers * sourceMax * 0.7;
+      var partialScore = partiallyCoveredTiers / totalTiers * sourceMax * 0.3;
+      sourceCoverage = Math.round(fullScore + partialScore);
+    }
     sourceCoverage = Math.min(sourceCoverage, sourceMax);
     total += sourceCoverage;
     maxTotal += sourceMax;
@@ -858,22 +1430,22 @@
     // 4. 传播节点识别 (max 25)
     var propScore = 0;
     var propMax = 25;
-    var interactions = annotatedMats.map(function(item) {
+    var allInteractions = c.materials.map(function(m) {
       return {
-        mat: item.mat,
-        interaction: (item.mat.likes || 0) + (item.mat.reposts || 0) + (item.mat.upvotes || 0),
-        ann: item.ann
+        mat: m,
+        interaction: (m.likes || 0) + (m.reposts || 0) + (m.upvotes || 0),
+        ann: getAnnotation(c.id, m.id)
       };
     }).sort(function(a, b) { return b.interaction - a.interaction; });
 
-    var top3 = interactions.slice(0, 3);
+    var top3 = allInteractions.slice(0, 3);
     var top3Annotated = top3.filter(function(item) { return item.ann && item.ann.stance; }).length;
     propScore = Math.round(top3Annotated / 3 * propMax);
     total += propScore;
     maxTotal += propMax;
 
     if (top3Annotated < top3.length) {
-      warnings.push('互动量前3的高传播节点尚未全部标注，这些节点对舆论传播影响最大');
+      warnings.push('全案例互动量前3的高传播节点尚未全部标注，这些节点对舆论传播影响最大');
     }
 
     dims.push({
@@ -901,6 +1473,82 @@
       dimensions: dims,
       warnings: warnings
     };
+  }
+
+  // ===== 课堂讲评摘要模块 =====
+  function renderClassroomSummarySection(c) {
+    var summary = getClassroomSummary(c.id);
+    var annotations = state.annotations[c.id] || {};
+
+    var html = '<div class="report-section">';
+    html += '<div class="report-section-title"><span class="icon">📋</span> 课堂讲评摘要';
+    if (!state.teacherMode) {
+      html += '<span class="section-subtitle">（教师填写，学生可查看）</span>';
+    }
+    html += '</div>';
+
+    html += '<div class="classroom-summary-card">';
+    if (state.teacherMode) {
+      html += '<div class="summary-toolbar">';
+      html += '<button class="btn btn-sm btn-outline" id="generate-summary">✨ 智能生成初稿</button>';
+      html += '<button class="btn btn-sm btn-primary" id="save-summary" style="margin-left:8px;">💾 保存摘要</button>';
+      html += '</div>';
+      html += '<textarea class="summary-input" id="classroom-summary-input" placeholder="在此编写课堂讲评摘要，可包括：案例主要叙事脉络、核心分歧点、关键传播节点、学生共性问题、证据链薄弱环节…">' + escapeHtml(summary) + '</textarea>';
+    } else {
+      if (summary && summary.trim()) {
+        html += '<div class="summary-content">' + escapeHtml(summary).replace(/\n/g, '<br>') + '</div>';
+      } else {
+        html += '<div class="teacher-review-empty">教师尚未编写课堂讲评摘要</div>';
+      }
+    }
+    html += '</div>';
+
+    html += '</div>';
+    return html;
+  }
+
+  function generateSummaryDraft(c) {
+    var annotations = state.annotations[c.id] || {};
+    var doneCount = getAnnotationCount(c.id);
+    var totalCount = c.materials.length;
+    var evidenceScore = computeEvidenceChainScore(c, annotations);
+
+    var draft = '';
+    draft += '【' + c.title + '】课堂讲评摘要\n\n';
+    draft += '一、整体情况\n';
+    draft += '本次练习共 ' + totalCount + ' 条材料，完成标注 ' + doneCount + ' 条（' + Math.round(doneCount / totalCount * 100) + '%）。\n';
+    draft += '证据链研判完整度：' + evidenceScore.total + '/100分。\n\n';
+
+    draft += '二、核心叙事脉络\n';
+    var stanceCounts = { supportive: 0, neutral: 0, critical: 0 };
+    Object.keys(annotations).forEach(function(mid) {
+      var ann = annotations[mid];
+      if (ann && ann.stance && stanceCounts[ann.stance] !== undefined) {
+        stanceCounts[ann.stance]++;
+      }
+    });
+    draft += '- 支持倾向：' + stanceCounts.supportive + ' 条\n';
+    draft += '- 中立倾向：' + stanceCounts.neutral + ' 条\n';
+    draft += '- 批判倾向：' + stanceCounts.critical + ' 条\n\n';
+
+    draft += '三、证据链分析\n';
+    evidenceScore.dimensions.forEach(function(dim) {
+      draft += '- ' + dim.label + '：' + dim.score + '/' + dim.max + '分\n';
+    });
+    draft += '\n';
+
+    if (evidenceScore.warnings.length > 0) {
+      draft += '四、需要关注的问题\n';
+      evidenceScore.warnings.forEach(function(w, i) {
+        draft += (i + 1) + '. ' + w + '\n';
+      });
+      draft += '\n';
+    }
+
+    draft += '五、教学建议\n';
+    draft += '（请在此处填写您的教学建议和点评要点）\n';
+
+    return draft;
   }
 
   // ===== 教师点评模块 =====
@@ -1300,7 +1948,7 @@
     if (!c) return;
 
     var packageData = {
-      version: '1.0',
+      version: '2.0',
       exportedAt: new Date().toISOString(),
       caseId: c.id,
       caseTitle: c.title,
@@ -1308,7 +1956,8 @@
       studentName: state.studentName,
       annotations: state.annotations[c.id] || {},
       editHistory: getCaseEditHistory(c.id),
-      teacherReviews: state.teacherReviews[c.id] || {}
+      teacherReviews: state.teacherReviews[c.id] || {},
+      classroomSummary: getClassroomSummary(c.id) || ''
     };
 
     var blob = new Blob([JSON.stringify(packageData, null, 2)], { type: 'application/json' });
@@ -1323,7 +1972,8 @@
     showToast('练习包已导出', 'success');
   }
 
-  function importPracticePackage(file) {
+  function importPracticePackage(file, addToRoster) {
+    addToRoster = addToRoster || false;
     var reader = new FileReader();
     reader.onload = function(e) {
       try {
@@ -1333,26 +1983,41 @@
           return;
         }
 
-        state.currentCaseId = data.caseId;
-        if (data.studentName) state.studentName = data.studentName;
-        if (!state.annotations[data.caseId]) state.annotations[data.caseId] = {};
-        Object.keys(data.annotations).forEach(function(k) {
-          state.annotations[data.caseId][k] = data.annotations[k];
-        });
-
-        if (Array.isArray(data.editHistory)) {
-          data.editHistory.forEach(function(h) { state.editHistory.push(h); });
-        }
-
-        if (data.teacherReviews) {
-          if (!state.teacherReviews[data.caseId]) state.teacherReviews[data.caseId] = {};
-          Object.keys(data.teacherReviews).forEach(function(k) {
-            state.teacherReviews[data.caseId][k] = data.teacherReviews[k];
+        if (addToRoster && state.teacherMode) {
+          addStudentToRoster({
+            name: data.studentName || '学生',
+            caseId: data.caseId,
+            annotations: data.annotations,
+            editHistory: data.editHistory || [],
+            teacherReviews: data.teacherReviews || {}
           });
-        }
+          showToast('已添加到班级花名册：' + (data.studentName || '学生'), 'success');
+        } else {
+          state.currentCaseId = data.caseId;
+          if (data.studentName) state.studentName = data.studentName;
+          if (!state.annotations[data.caseId]) state.annotations[data.caseId] = {};
+          Object.keys(data.annotations).forEach(function(k) {
+            state.annotations[data.caseId][k] = data.annotations[k];
+          });
 
-        saveState();
-        showToast('练习包导入成功！', 'success');
+          if (Array.isArray(data.editHistory)) {
+            data.editHistory.forEach(function(h) { state.editHistory.push(h); });
+          }
+
+          if (data.teacherReviews) {
+            if (!state.teacherReviews[data.caseId]) state.teacherReviews[data.caseId] = {};
+            Object.keys(data.teacherReviews).forEach(function(k) {
+              state.teacherReviews[data.caseId][k] = data.teacherReviews[k];
+            });
+          }
+
+          if (data.classroomSummary !== undefined) {
+            setClassroomSummary(data.caseId, data.classroomSummary || '');
+          }
+
+          saveState();
+          showToast('练习包导入成功！', 'success');
+        }
         render();
       } catch(err) {
         console.error(err);
@@ -1493,8 +2158,116 @@
             setTeacherReview(state.currentCaseId, key, newVal);
           }
         });
+        if (state.viewingStudentId && state.classRoster[state.viewingStudentId]) {
+          var student = state.classRoster[state.viewingStudentId];
+          if (!student.teacherReviews) student.teacherReviews = {};
+          if (!student.teacherReviews[state.currentCaseId]) student.teacherReviews[state.currentCaseId] = {};
+          Object.keys(state.teacherReviews[state.currentCaseId] || {}).forEach(function(k) {
+            student.teacherReviews[state.currentCaseId][k] = state.teacherReviews[state.currentCaseId][k];
+          });
+          saveState();
+        }
         showToast('教师点评已保存', 'success');
         render();
+      });
+    }
+
+    document.querySelectorAll('.compare-tab').forEach(function(tab) {
+      tab.addEventListener('click', function() {
+        state.comparisonMode = tab.dataset.compareMode;
+        saveState();
+        render();
+      });
+    });
+
+    var dashboardCaseSelect = document.getElementById('dashboard-case-select');
+    if (dashboardCaseSelect) {
+      dashboardCaseSelect.value = state.currentCaseId || '';
+      dashboardCaseSelect.addEventListener('change', function() {
+        state.currentCaseId = dashboardCaseSelect.value || null;
+        saveState();
+        render();
+      });
+    }
+
+    var dashboardImportBtn = document.getElementById('dashboard-import-btn');
+    var dashboardImportFile = document.getElementById('dashboard-import-file');
+    if (dashboardImportBtn && dashboardImportFile) {
+      dashboardImportBtn.addEventListener('click', function() { dashboardImportFile.click(); });
+      dashboardImportFile.addEventListener('change', function(e) {
+        if (e.target.files && e.target.files.length > 0) {
+          for (var i = 0; i < e.target.files.length; i++) {
+            importPracticePackage(e.target.files[i], true);
+          }
+          setTimeout(function() { render(); }, 300);
+        }
+      });
+    }
+
+    document.querySelectorAll('.view-student-btn').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var studentId = btn.dataset.studentId;
+        var student = state.classRoster[studentId];
+        if (student) {
+          state.viewingStudentId = studentId;
+          state.currentCaseId = student.caseId;
+          if (!state.annotations[student.caseId]) state.annotations[student.caseId] = {};
+          var anns = student.annotations[student.caseId] || student.annotations || {};
+          Object.keys(anns).forEach(function(k) {
+            state.annotations[student.caseId][k] = anns[k];
+          });
+          if (student.teacherReviews) {
+            if (!state.teacherReviews[student.caseId]) state.teacherReviews[student.caseId] = {};
+            var revs = student.teacherReviews[student.caseId] || student.teacherReviews || {};
+            Object.keys(revs).forEach(function(k) {
+              state.teacherReviews[student.caseId][k] = revs[k];
+            });
+          }
+          state.studentName = student.name;
+          saveState();
+          location.hash = '#/report';
+        }
+      });
+    });
+
+    document.querySelectorAll('.remove-student-btn').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var studentId = btn.dataset.studentId;
+        var student = state.classRoster[studentId];
+        if (student && confirm('确定要删除学生「' + student.name + '」的练习数据吗？')) {
+          removeStudentFromRoster(studentId);
+          showToast('已删除', 'success');
+          render();
+        }
+      });
+    });
+
+    var saveSummaryBtn = document.getElementById('save-summary');
+    if (saveSummaryBtn) {
+      saveSummaryBtn.addEventListener('click', function() {
+        var input = document.getElementById('classroom-summary-input');
+        if (input) {
+          setClassroomSummary(state.currentCaseId, input.value);
+          showToast('课堂讲评摘要已保存', 'success');
+          render();
+        }
+      });
+    }
+
+    var generateSummaryBtn = document.getElementById('generate-summary');
+    if (generateSummaryBtn) {
+      generateSummaryBtn.addEventListener('click', function() {
+        var c = getCase(state.currentCaseId);
+        if (c) {
+          var draft = generateSummaryDraft(c);
+          var input = document.getElementById('classroom-summary-input');
+          if (input) {
+            input.value = draft;
+            showToast('已生成摘要初稿，记得保存哦', 'success');
+          }
+        }
       });
     }
   }
