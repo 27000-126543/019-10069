@@ -1875,7 +1875,12 @@ body {
   font-weight: 600;
 }
 
-.stance-badge.stance-supportive {
+.stance-badge.stance-pro-china {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.stance-badge.stance-pro-west {
   background: #dbeafe;
   color: #2563eb;
 }
@@ -1885,9 +1890,19 @@ body {
   color: #6b7280;
 }
 
-.stance-badge.stance-critical {
-  background: #fee2e2;
-  color: #dc2626;
+.stance-badge.stance-anti-establishment {
+  background: #f3e8ff;
+  color: #7c3aed;
+}
+
+.stance-badge.stance-pro-developing {
+  background: #dcfce7;
+  color: #16a34a;
+}
+
+.stance-badge.stance-ambiguous {
+  background: #fef3c7;
+  color: #d97706;
 }
 
 /* Divisive List */

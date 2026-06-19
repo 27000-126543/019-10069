@@ -70,12 +70,39 @@
     return null;
   }
 
+  function getCurrentStudent() {
+    if (state.teacherMode && state.viewingStudentId && state.classRoster[state.viewingStudentId]) {
+      return state.classRoster[state.viewingStudentId];
+    }
+    return null;
+  }
+
+  function getCaseAnnotations(caseId) {
+    var student = getCurrentStudent();
+    if (student) {
+      return student.annotations[caseId] || student.annotations || {};
+    }
+    return state.annotations[caseId] || {};
+  }
+
   function getAnnotation(caseId, materialId) {
+    var student = getCurrentStudent();
+    if (student) {
+      var anns = student.annotations[caseId] || student.annotations || {};
+      return anns[materialId] || null;
+    }
     if (!state.annotations[caseId]) return null;
     return state.annotations[caseId][materialId] || null;
   }
 
   function setAnnotation(caseId, materialId, annotation) {
+    var student = getCurrentStudent();
+    if (student) {
+      if (!student.annotations[caseId]) student.annotations[caseId] = {};
+      student.annotations[caseId][materialId] = annotation;
+      saveState();
+      return;
+    }
     if (!state.annotations[caseId]) state.annotations[caseId] = {};
     state.annotations[caseId][materialId] = annotation;
     saveState();
@@ -87,11 +114,23 @@
   }
 
   function getTeacherReview(caseId, reviewKey) {
+    var student = getCurrentStudent();
+    if (student) {
+      if (!student.teacherReviews[caseId]) return '';
+      return student.teacherReviews[caseId][reviewKey] || '';
+    }
     if (!state.teacherReviews[caseId]) return '';
     return state.teacherReviews[caseId][reviewKey] || '';
   }
 
   function setTeacherReview(caseId, reviewKey, text) {
+    var student = getCurrentStudent();
+    if (student) {
+      if (!student.teacherReviews[caseId]) student.teacherReviews[caseId] = {};
+      student.teacherReviews[caseId][reviewKey] = text;
+      saveState();
+      return;
+    }
     if (!state.teacherReviews[caseId]) state.teacherReviews[caseId] = {};
     state.teacherReviews[caseId][reviewKey] = text;
     saveState();
@@ -151,7 +190,8 @@
   function getStudentMainStance(student) {
     if (!student.annotations || !student.caseId) return null;
     var anns = student.annotations[student.caseId] || student.annotations;
-    var counts = { supportive: 0, neutral: 0, critical: 0 };
+    var counts = {};
+    STANCE_OPTIONS.forEach(function(s) { counts[s.value] = 0; });
     Object.keys(anns).forEach(function(k) {
       if (anns[k] && anns[k].stance && counts[anns[k].stance] !== undefined) {
         counts[anns[k].stance]++;
@@ -175,9 +215,11 @@
 
     var materialStats = {};
     c.materials.forEach(function(m) {
+      var stances = {};
+      STANCE_OPTIONS.forEach(function(s) { stances[s.value] = 0; });
       materialStats[m.id] = {
         material: m,
-        stances: { supportive: 0, neutral: 0, critical: 0 },
+        stances: stances,
         emotions: [],
         entities: {},
         audiences: {},
@@ -215,9 +257,9 @@
     Object.keys(materialStats).forEach(function(mid) {
       var ms = materialStats[mid];
       if (ms.annotatedCount >= 2) {
-        var stanceValues = [ms.stances.supportive, ms.stances.neutral, ms.stances.critical];
+        var stanceValues = STANCE_OPTIONS.map(function(s) { return ms.stances[s.value]; });
         var maxStance = Math.max.apply(null, stanceValues);
-        var totalStance = ms.stances.supportive + ms.stances.neutral + ms.stances.critical;
+        var totalStance = stanceValues.reduce(function(a, b) { return a + b; }, 0);
         var divergence = totalStance > 0 ? 1 - (maxStance / totalStance) : 0;
         divisiveMaterials.push({
           materialId: mid,
@@ -281,16 +323,16 @@
     var ms = stats.materialStats[materialId];
     if (ms.annotatedCount === 0) return null;
 
-    var totalStance = ms.stances.supportive + ms.stances.neutral + ms.stances.critical;
+    var totalStance = STANCE_OPTIONS.reduce(function(sum, s) { return sum + ms.stances[s.value]; }, 0);
     var avgStance = null;
     if (totalStance > 0) {
-      if (ms.stances.supportive >= ms.stances.neutral && ms.stances.supportive >= ms.stances.critical) {
-        avgStance = 'supportive';
-      } else if (ms.stances.critical >= ms.stances.neutral && ms.stances.critical >= ms.stances.supportive) {
-        avgStance = 'critical';
-      } else {
-        avgStance = 'neutral';
-      }
+      var maxCount = 0;
+      STANCE_OPTIONS.forEach(function(s) {
+        if (ms.stances[s.value] > maxCount) {
+          maxCount = ms.stances[s.value];
+          avgStance = s.value;
+        }
+      });
     }
 
     var avgEmotion = 3;
@@ -318,6 +360,13 @@
   }
 
   function getAnnotationCount(caseId) {
+    var student = getCurrentStudent();
+    if (student) {
+      var anns = student.annotations[caseId] || student.annotations || {};
+      return Object.keys(anns).filter(function(k) {
+        return anns[k] && anns[k].stance;
+      }).length;
+    }
     if (!state.annotations[caseId]) return 0;
     return Object.keys(state.annotations[caseId]).filter(function(k) {
       return state.annotations[caseId][k] && state.annotations[caseId][k].stance;
@@ -325,7 +374,8 @@
   }
 
   function addEditHistory(caseId, materialId, field, oldVal, newVal) {
-    state.editHistory.push({
+    var student = getCurrentStudent();
+    var historyEntry = {
       caseId: caseId,
       materialId: materialId,
       field: field,
@@ -334,14 +384,28 @@
       timestamp: new Date().toLocaleString('zh-CN'),
       role: state.teacherMode ? 'teacher' : 'student',
       actorName: state.teacherMode ? '教师' : state.studentName
-    });
-    if (state.editHistory.length > 500) {
-      state.editHistory = state.editHistory.slice(-500);
+    };
+    
+    if (student) {
+      if (!student.editHistory) student.editHistory = [];
+      student.editHistory.push(historyEntry);
+      if (student.editHistory.length > 500) {
+        student.editHistory = student.editHistory.slice(-500);
+      }
+    } else {
+      state.editHistory.push(historyEntry);
+      if (state.editHistory.length > 500) {
+        state.editHistory = state.editHistory.slice(-500);
+      }
     }
     saveState();
   }
 
   function getCaseEditHistory(caseId) {
+    var student = getCurrentStudent();
+    if (student) {
+      return (student.editHistory || []).filter(function(h) { return h.caseId === caseId; });
+    }
     return state.editHistory.filter(function(h) { return h.caseId === caseId; });
   }
 
@@ -363,12 +427,15 @@
   function route() {
     var hash = location.hash || '#/';
     if (hash === '#/' || hash === '#') {
+      state.viewingStudentId = null;
       state.currentPage = 'cases';
     } else if (hash === '#/annotate') {
+      state.viewingStudentId = null;
       state.currentPage = 'annotate';
     } else if (hash === '#/report') {
       state.currentPage = 'report';
     } else if (hash === '#/dashboard') {
+      state.viewingStudentId = null;
       state.currentPage = 'dashboard';
     } else if (hash.startsWith('#/case/')) {
       var caseId = hash.replace('#/case/', '');
@@ -391,6 +458,8 @@
         location.hash = '#/report';
         return;
       }
+    } else {
+      state.viewingStudentId = null;
     }
     updateNav();
     render();
@@ -617,9 +686,11 @@
         html += '<div class="divisive-title">' + escapeHtml(mat.title || mat.content.slice(0, 50) + '...') + '</div>';
         html += '<div class="divisive-source">' + mat.source + ' · ' + mat.timestamp + '</div>';
         html += '<div class="stance-distribution">';
-        html += '<span class="stance-dist-item dist-supportive">支持 ' + dm.stances.supportive + '</span>';
-        html += '<span class="stance-dist-item dist-neutral">中立 ' + dm.stances.neutral + '</span>';
-        html += '<span class="stance-dist-item dist-critical">批判 ' + dm.stances.critical + '</span>';
+        STANCE_OPTIONS.forEach(function(s) {
+          if (dm.stances[s.value] > 0) {
+            html += '<span class="stance-dist-item dist-' + s.value + '" style="background:' + s.color + '20;color:' + s.color + ';">' + s.label.split('/')[0] + ' ' + dm.stances[s.value] + '</span>';
+          }
+        });
         html += '<span class="divisive-score">分歧度 ' + Math.round(dm.divergence * 100) + '%</span>';
         html += '</div>';
         html += '</div></div>';
@@ -914,18 +985,27 @@
     }
 
     if (classAvg && classAvg.stances) {
-      var total = classAvg.stances.supportive + classAvg.stances.neutral + classAvg.stances.critical;
+      var total = STANCE_OPTIONS.reduce(function(sum, s) { return sum + (classAvg.stances[s.value] || 0); }, 0);
       html += '<div class="class-stance-dist">';
       html += '<div class="comparison-field" style="padding:0 22px 10px;">📊 班级立场分布（共' + classAvg.sampleSize + '人标注）</div>';
       html += '<div class="stance-bar" style="padding:0 22px 16px;">';
       html += '<div class="stance-bar-fill">';
-      var supPct = total > 0 ? Math.round(classAvg.stances.supportive / total * 100) : 0;
-      var neuPct = total > 0 ? Math.round(classAvg.stances.neutral / total * 100) : 0;
-      var criPct = total > 0 ? Math.round(classAvg.stances.critical / total * 100) : 0;
-      html += '<div class="stance-bar-seg seg-supportive" style="width:' + supPct + '%;" title="支持' + classAvg.stances.supportive + '人"></div>';
-      html += '<div class="stance-bar-seg seg-neutral" style="width:' + neuPct + '%;" title="中立' + classAvg.stances.neutral + '人"></div>';
-      html += '<div class="stance-bar-seg seg-critical" style="width:' + criPct + '%;" title="批判' + classAvg.stances.critical + '人"></div>';
+      STANCE_OPTIONS.forEach(function(s) {
+        var count = classAvg.stances[s.value] || 0;
+        var pct = total > 0 ? Math.round(count / total * 100) : 0;
+        if (pct > 0) {
+          html += '<div class="stance-bar-seg seg-' + s.value + '" style="width:' + pct + '%;background:' + s.color + ';" title="' + s.label + ' ' + count + '人"></div>';
+        }
+      });
       html += '</div></div>';
+      html += '<div class="stance-legend" style="padding:0 22px 10px;display:flex;flex-wrap:wrap;gap:8px 12px;font-size:12px;">';
+      STANCE_OPTIONS.forEach(function(s) {
+        var count = classAvg.stances[s.value] || 0;
+        if (count > 0) {
+          html += '<span style="display:flex;align-items:center;gap:4px;"><span style="width:10px;height:10px;border-radius:2px;background:' + s.color + ';"></span>' + s.label.split('/')[0] + ' ' + count + '</span>';
+        }
+      });
+      html += '</div>';
       html += '</div>';
     }
 
@@ -1188,7 +1268,7 @@
 
     var doneCount = getAnnotationCount(c.id);
     var totalCount = c.materials.length;
-    var annotations = state.annotations[c.id] || {};
+    var annotations = getCaseAnnotations(c.id);
 
     if (doneCount === 0) {
       return renderModeBar() + '<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;">' +
@@ -1319,24 +1399,19 @@
 
     var sourceCoverage = 0;
     var sourceMax = 25;
-    var totalTiers = 0;
-    var fullyCoveredTiers = 0;
-    var partiallyCoveredTiers = 0;
+    var existingTiers = 0;
+    var coveredTiers = 0;
     Object.keys(tierCounts).forEach(function(t) {
       if (tierCounts[t] > 0) {
-        totalTiers++;
-        if (tierAnnotated[t] === tierCounts[t]) {
-          fullyCoveredTiers++;
-        } else if (tierAnnotated[t] > 0) {
-          partiallyCoveredTiers++;
+        existingTiers++;
+        if (tierAnnotated[t] > 0) {
+          coveredTiers++;
         }
       }
     });
 
-    if (totalTiers > 0) {
-      var fullScore = fullyCoveredTiers / totalTiers * sourceMax * 0.7;
-      var partialScore = partiallyCoveredTiers / totalTiers * sourceMax * 0.3;
-      sourceCoverage = Math.round(fullScore + partialScore);
+    if (existingTiers > 0) {
+      sourceCoverage = Math.round(coveredTiers / existingTiers * sourceMax);
     }
     sourceCoverage = Math.min(sourceCoverage, sourceMax);
     total += sourceCoverage;
@@ -1520,16 +1595,20 @@
     draft += '证据链研判完整度：' + evidenceScore.total + '/100分。\n\n';
 
     draft += '二、核心叙事脉络\n';
-    var stanceCounts = { supportive: 0, neutral: 0, critical: 0 };
+    var stanceCounts = {};
+    STANCE_OPTIONS.forEach(function(s) { stanceCounts[s.value] = 0; });
     Object.keys(annotations).forEach(function(mid) {
       var ann = annotations[mid];
       if (ann && ann.stance && stanceCounts[ann.stance] !== undefined) {
         stanceCounts[ann.stance]++;
       }
     });
-    draft += '- 支持倾向：' + stanceCounts.supportive + ' 条\n';
-    draft += '- 中立倾向：' + stanceCounts.neutral + ' 条\n';
-    draft += '- 批判倾向：' + stanceCounts.critical + ' 条\n\n';
+    STANCE_OPTIONS.forEach(function(s) {
+      if (stanceCounts[s.value] > 0) {
+        draft += '- ' + s.label + '：' + stanceCounts[s.value] + ' 条\n';
+      }
+    });
+    draft += '\n';
 
     draft += '三、证据链分析\n';
     evidenceScore.dimensions.forEach(function(dim) {
@@ -1849,8 +1928,8 @@
     if (annotatedMaterials.length === 0) return '';
 
     var maxInteraction = 0;
-    annotatedMaterials.forEach(function(item) {
-      var interaction = (item.material.likes || 0) + (item.material.reposts || 0) + (item.material.upvotes || 0);
+    c.materials.forEach(function(m) {
+      var interaction = (m.likes || 0) + (m.reposts || 0) + (m.upvotes || 0);
       if (interaction > maxInteraction) maxInteraction = interaction;
     });
 
@@ -1953,10 +2032,10 @@
       caseId: c.id,
       caseTitle: c.title,
       caseData: c,
-      studentName: state.studentName,
-      annotations: state.annotations[c.id] || {},
+      studentName: getCurrentStudent() ? getCurrentStudent().name : state.studentName,
+      annotations: getCaseAnnotations(c.id),
       editHistory: getCaseEditHistory(c.id),
-      teacherReviews: state.teacherReviews[c.id] || {},
+      teacherReviews: getCurrentStudent() ? (getCurrentStudent().teacherReviews[c.id] || {}) : (state.teacherReviews[c.id] || {}),
       classroomSummary: getClassroomSummary(c.id) || ''
     };
 
